@@ -1,0 +1,1024 @@
+---
+title: "Rhizosphere metabolome project - analysis of untargeted metabolomics data"
+author: "Benjamin Delory"
+date: "31/08/2020"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+    fig_caption: TRUE
+editor_options: 
+  chunk_output_type: console
+---
+
+This document details the R pipeline used to explore and analyse the metabolomics data presented in **Delory et al (2020) The rhizosphere metabolome triggers species-specific and context-dependent root responses in later arriving plants**. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center")
+```
+
+# Load R packages
+
+```{r Load R packages, warning=FALSE, message=FALSE}
+library(randomForest)
+library(missForest)
+library(FactoMineR)
+library(scatterplot3d)
+library(GGally)
+library(MASS)
+library(emmeans)
+library(rgl)
+library(car)
+library(gplots)
+library(ggforce)
+library(ggpubr)
+library(hierDiversity)
+library(ggplot2)
+library(Boruta)
+```
+
+# Create R function for group-wise diversity partitioning
+
+`diversity.partitioning` is an R function for group-wise diversity partitioning. It is entirely based on the complexity-as-diversity approach described in [Marion et al (2015). Extending the concept of diversity partitioning to characterize phenotypic complexity. The American Naturalist, 186, 348-361](https://www.journals.uchicago.edu/doi/10.1086/682369). This method relies on constructing diversity profile plots to visualise how effective diversity varies with diversity order (q). For each diversity order q, hierarchical partitioning is used to partition total effective chemical diversity (gamma diversity) into two components: alpha diversity (i.e., the average effective number of metabolites in a sample) and beta diversity (i.e., the effective number of completely distinct metabolomes present within a group). Diversity components are partitioned multiplicatively.
+
+```{r diversity.partitioning, message=FALSE, warning=FALSE}
+diversity.partitioning<-function(x, group, reps=100, q=seq(0, 3 ,by=0.1)){
+  
+  #x is a data matrix of proportional chemical abundance with K columns (metabolites)
+  #and N rows (samples)
+  #NA values replaced with zeros for this analysis
+  
+  #group is a matrix with the different treatment levels (with columns L1 and L2)
+  
+  #reps is the number of bootstrap replicates to conduct for approximating uncertainty
+  
+  #q is a vector of diversity orders
+  
+  #Create dataframes to store results
+  n<-length(q)*16
+  results<-data.frame(q=rep(NA, n),
+                      Treatment=rep(NA, n),
+                      Diversity=rep(NA, n),
+                      Value=rep(NA, n),
+                      CIlow=rep(NA, n),
+                      CIhigh=rep(NA, n))
+  
+  k<-0
+  
+  for (i in 1:length(q)){
+    
+    part<-hierDiversity(dat=x, group=group, reps=reps, quant = c(0.025, 0.975), q=q[i])
+    
+    results[(k+1):(k+16),]<-as.data.frame(cbind(rep(q[i], 16),
+                                 rep(unique(group[,1]), each=4),
+                                 rep(c("alpha","beta", "gamma","turnover"), 4),
+                                 c(part$L1[[1]][1,1:4],
+                                   part$L1[[2]][1,1:4],
+                                   part$L1[[3]][1,1:4],
+                                   part$L1[[4]][1,1:4]),
+                                 c(part$L1[[1]][3,1:4],
+                                   part$L1[[2]][3,1:4],
+                                   part$L1[[3]][3,1:4],
+                                   part$L1[[4]][3,1:4]),
+                                 c(part$L1[[1]][4,1:4],
+                                   part$L1[[2]][4,1:4],
+                                   part$L1[[3]][4,1:4],
+                                   part$L1[[4]][4,1:4])))
+    
+    k<-i*16}
+  
+  results<-as.data.frame(apply(results, 2, unlist))
+  results$q<-as.numeric(as.character(results$q))
+  results$Value<-as.numeric(as.character(results$Value))
+  results$CIlow<-as.numeric(as.character(results$CIlow))
+  results$CIhigh<-as.numeric(as.character(results$CIhigh))
+  
+  return(results)}
+```
+
+# Load metabolomics data in R
+
+```{r Load data in R, message=FALSE, warning=FALSE}
+#Load positive ionisation data
+pos <- read.csv("C:/Users/Delory/Documents/GitHub/rhizometabolome/data/dd_max_heuristic_SN50_bw3_pos_1.csv", header=TRUE)
+
+#Load negative ionisation data
+neg <- read.csv("C:/Users/Delory/Documents/GitHub/rhizometabolome/data/dd_max_heuristic_SN50_bw3_neg_1.csv", header=TRUE)
+
+#Load DOC data
+doc <- read.csv("C:/Users/Delory/Documents/GitHub/rhizometabolome/data/DOC.csv", header=TRUE)
+
+rownames(pos)<-paste("PC", pos$PC, "_mz", round(pos$mz, 1) , "_rt", round(pos$rt, 1), sep="")
+rownames(neg)<-paste("PC", neg$PC, "_mz", round(neg$mz, 1) , "_rt", round(neg$rt, 1), sep="")
+
+pos<-pos[,-c(1:13)]
+neg<-neg[,-c(1:13)]
+doc<-doc[c(21:30, 1:20),]
+```
+
+# Dissolved organic carbon concentration
+
+```{r DOC, message=FALSE, warning=FALSE, fig.height=2.8, fig.width=3.1}
+doc1<-doc[-26,] #Remove CTL 6 (outlier)
+
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green)
+
+cex.axis<-9
+cex.title<-10
+cex.pt<-1.7
+
+ggplot(doc1, aes(x=Treatment, y=DOC, fill=Treatment))+
+  geom_boxplot(alpha=0.4, outlier.shape = NA, width=0.5)+
+  geom_jitter(aes(x=Treatment, y=DOC, fill=Treatment), shape=21, size=cex.pt, alpha=0.6,
+              position=position_jitter(width=0.15))+
+  theme_bw()+
+  xlab("")+
+  ylab("[DOC] (mg/L)")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(r = 5)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none")+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+model<-lm(DOC~Treatment, data=doc1)
+anova(model)
+summary(emmeans(model, "Treatment", contr="tukey"), type="response")
+
+doc.es<-aggregate(doc1$DOC, by=list(Treatment=doc1$Treatment), mean)
+colnames(doc.es)[2]<-"DOC"
+doc.es$ES<-100*(doc.es$DOC-doc.es$DOC[1])/doc.es$DOC[1]
+knitr::kable(doc.es, caption="Mean DOC values (mg/L) for each treatment. Effect sizes (ES) provided in %.")
+```
+
+# Metabolite richness
+
+```{r Metabolite richness, message=FALSE, warning=FALSE}
+#Calculate metabolite richness for positive and negative ionisation data
+mdiversity<-data.frame(Treatment=c(rep("Forbs", 10), rep("Grasses", 10), rep("CTL", 10), rep("Tap", 5)),
+                       Richness.pos=as.numeric(apply(pos, 2, function(x){length(which(!is.na(x)))})),
+                       Richness.neg=as.numeric(apply(neg, 2, function(x){length(which(!is.na(x)))})),
+                       DOC=c(as.numeric(doc$DOC), rep(NA, 5)))
+
+mdiversity<-mdiversity[-c(26,31:35),] #Remove CTL 6 (outlier) and Tap water samples
+```
+
+## Positive ionisation data
+
+```{r Plot richness (positive), fig.height=2.8, fig.width=3.1, message=FALSE, warning=FALSE, fig.cap="Metabolite richness (positive ionisation)"}
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green)
+
+cex.axis<-9
+cex.title<-10
+cex.pt<-1.7
+
+p1<-ggplot(mdiversity, aes(x=Treatment, y=Richness.pos, fill=Treatment))+
+  geom_boxplot(alpha=0.4, outlier.shape = NA, width=0.6)+
+  geom_jitter(aes(x=Treatment, y=Richness.pos, fill=Treatment), shape=21, size=cex.pt, alpha=0.6,
+              position=position_jitter(width=0.2))+
+  theme_bw()+
+  xlab("")+
+  ylab("Metabolite richness")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none")+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+p1
+
+#ggsave("Metabolite_richness.tiff", p1, dpi=1000, compression="lzw", width=7, height=8, units="cm")
+
+#Statistics
+model<-glm.nb(Richness.pos~Treatment, mdiversity) #Use negative binomial distribution because Poisson is overdispersed
+summary(model)
+round(predict(model, newdata = data.frame(Treatment=c("CTL", "Forbs", "Grasses")), type="response"))
+drop1(model, test="LRT")
+deviance<-100*(model$null.deviance-model$deviance)/model$null.deviance
+deviance
+E1<-resid(model, type="pearson")
+dispersion<-sum(E1^2)/(29-length(coef(model))-1)
+dispersion
+summary(emmeans(model, "Treatment", contr="tukey"), type="response")
+```
+
+## Negative ionisation data
+
+```{r Plot richness (negative), fig.height=2.8, fig.width=3.1, message=FALSE, warning=FALSE, fig.cap="Metabolite richness (negative ionisation)"}
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green)
+
+cex.axis<-9
+cex.title<-10
+cex.pt<-1.7
+
+ggplot(mdiversity, aes(x=Treatment, y=Richness.neg, fill=Treatment))+
+  geom_boxplot(alpha=0.4, outlier.shape = NA, width=0.6)+
+  geom_jitter(aes(x=Treatment, y=Richness.neg, fill=Treatment), shape=21, size=cex.pt, alpha=0.6,
+              position=position_jitter(width=0.2))+
+  theme_bw()+
+  xlab("")+
+  ylab("Metabolite richness")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none")+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+model<-glm.nb(Richness.neg~Treatment, mdiversity) #Use negative binomial distribution because Poisson is overdispersed
+summary(model)
+deviance<-100*(model$null.deviance-model$deviance)/model$null.deviance
+deviance
+E1<-resid(model, type="pearson")
+dispersion<-sum(E1^2)/(29-length(coef(model))-1)
+dispersion
+summary(emmeans(model, "Treatment", contr="tukey"), type="response")
+```
+
+# Abundance-Diversity relationship
+
+## Positive ionisation data
+
+```{r Plot abundance-diversity (positive), fig.height=3.15, fig.width=3.94, message=FALSE, warning=FALSE, fig.cap="Abundance-Diversity relationship (positive ionisation data)"}
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green)
+
+cex.axis<-8
+cex.title<-9
+cex.pt<-1.5
+
+p2<-ggplot(mdiversity, aes(x=DOC, y=Richness.pos, color=Treatment, shape=Treatment))+
+  geom_smooth(method="lm", se=FALSE, linetype=2, size=0.8)+
+  geom_smooth(data=mdiversity, mapping=aes(x=DOC, y=Richness.pos), inherit.aes = F, method="lm", color="black")+
+  geom_point(size=2.5)+
+  theme_bw()+
+  xlab(expression(paste("Dissolved organic carbon (mg ", L^-1, ")")))+
+  ylab("Metabolite richness")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 7, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position=c(0.12,0.9),
+        legend.background = element_blank(),
+        legend.key = element_blank(),
+        legend.text=element_text(size=7),
+        legend.key.size = unit(0.85,"line"),
+        legend.title = element_blank())+
+  scale_color_manual(values=cbPalette)+
+  scale_shape_manual(values=c(16, 15, 17))
+
+p2
+
+#ggsave("Abundance_diversity_metabolites.tiff", p2, dpi=1000, compression="lzw", width=10, height=8, units="cm")
+
+cor.test(mdiversity$DOC, mdiversity$Richness.pos)
+
+cor.test(mdiversity$DOC[mdiversity$Treatment=="CTL"], mdiversity$Richness.pos[mdiversity$Treatment=="CTL"])
+
+cor.test(mdiversity$DOC[mdiversity$Treatment=="Forbs"], mdiversity$Richness.pos[mdiversity$Treatment=="Forbs"])
+
+cor.test(mdiversity$DOC[mdiversity$Treatment=="Grasses"], mdiversity$Richness.pos[mdiversity$Treatment=="Grasses"])
+```
+
+## Negative ionisation data
+
+```{r Plot abundance-diversity (negative), fig.height=3.15, fig.width=3.94, message=FALSE, warning=FALSE, fig.cap="Abundance-Diversity relationship (negative ionisation data)"}
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green)
+
+cex.axis<-8
+cex.title<-9
+cex.pt<-1.5
+
+ggplot(mdiversity, aes(x=DOC, y=Richness.neg, color=Treatment, shape=Treatment))+
+  geom_smooth(method="lm", se=FALSE, linetype=2, size=0.8)+
+  geom_smooth(data=mdiversity, mapping=aes(x=DOC, y=Richness.neg), inherit.aes = F, method="lm", color="black")+
+  geom_point(size=2.5)+
+  theme_bw()+
+  xlab(expression(paste("Dissolved organic carbon (mg ", L^-1, ")")))+
+  ylab("Metabolite richness")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none")+
+  scale_color_manual(values=cbPalette)+
+  scale_shape_manual(values=c(16, 15, 17))
+
+cor.test(mdiversity$DOC, mdiversity$Richness.neg)
+
+cor.test(mdiversity$DOC[mdiversity$Treatment=="CTL"], mdiversity$Richness.neg[mdiversity$Treatment=="CTL"])
+
+cor.test(mdiversity$DOC[mdiversity$Treatment=="Forbs"], mdiversity$Richness.neg[mdiversity$Treatment=="Forbs"])
+
+cor.test(mdiversity$DOC[mdiversity$Treatment=="Grasses"], mdiversity$Richness.neg[mdiversity$Treatment=="Grasses"])
+```
+
+# Diversity partitioning
+
+## Positive ionisation
+
+```{r Diversity partitioning (positive), message=FALSE, warning=FALSE, fig.cap="Diversity partitioning (positive ionisation data)"}
+pos.diversityplot<-t(pos)
+pos.diversityplot[is.na(pos.diversityplot)]<-0
+pos.diversityplot<-t(apply(pos.diversityplot, 1, function(x){x/sum(x)}))
+pos.diversityplot<-pos.diversityplot[-26,] #Remove CTL 6 (outlier)
+
+group<-as.matrix(data.frame(L1=c(rep("Forbs", 10), rep("Grasses", 10), rep("CTL", 9), rep("Tap", 5)), L2=rep("total", 34)))
+
+pos.part<-diversity.partitioning(x=pos.diversityplot, group=group) #!time consuming!#
+
+#Plot results
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green, "black")
+
+cex.axis<-8
+cex.title<-9
+cex.strip<-9
+
+ggplot(pos.part, aes(x=q, y=Value, color=Treatment))+
+  facet_wrap(~Diversity, scales="free_y")+
+  geom_ribbon(aes(x=q, ymin=CIlow, ymax=CIhigh, fill=Treatment), alpha=0.1, color=NA)+
+  geom_line(aes(linetype=Treatment))+
+  theme_bw()+
+  xlab("Diversity order (q)")+
+  ylab("Effective metabolite richness")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none",
+        strip.text = element_text(size=cex.strip))+
+  scale_color_manual(values=cbPalette)+
+  scale_fill_manual(values=cbPalette)
+```
+
+## Negative ionisation
+
+```{r Diversity partitioning (negative), message=FALSE, warning=FALSE, fig.cap="Diversity partitioning (negative ionisation data)"}
+neg.diversityplot<-t(neg)
+neg.diversityplot[is.na(neg.diversityplot)]<-0
+neg.diversityplot<-t(apply(neg.diversityplot, 1, function(x){x/sum(x)}))
+neg.diversityplot<-neg.diversityplot[-26,] #Remove CTL 6 (outlier)
+
+group<-as.matrix(data.frame(L1=c(rep("Forbs", 10), rep("Grasses", 10), rep("CTL", 9), rep("Tap", 5)), L2=rep("total", 34)))
+
+neg.part<-diversity.partitioning(x=neg.diversityplot, group=group) #!time consuming!#
+
+#Plot results
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green, "black")
+
+cex.axis<-8
+cex.title<-9
+cex.strip<-9
+
+ggplot(neg.part, aes(x=q, y=Value, color=Treatment))+
+  facet_wrap(~Diversity, scales="free_y")+
+  geom_ribbon(aes(x=q, ymin=CIlow, ymax=CIhigh, fill=Treatment), alpha=0.1, color=NA)+
+  geom_line(aes(linetype=Treatment))+
+  theme_bw()+
+  xlab("Diversity order (q)")+
+  ylab("Effective metabolite richness")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none",
+        strip.text = element_text(size=cex.strip))+
+  scale_color_manual(values=cbPalette)+
+  scale_fill_manual(values=cbPalette)
+```
+
+# Data processing
+
+## Remove constant features
+
+Features with a constant or single value across samples were found and removed from the dataset.
+
+```{r Remove constant features, warning=FALSE, message=TRUE}
+#Remove tap water samples
+pos<-as.data.frame(pos[,-c(31:35)])
+neg<-as.data.frame(neg[,-c(31:35)])
+
+#Check
+varCol <- apply(t(pos), 2, var, na.rm=T)
+constCol <- (varCol == 0 | is.na(varCol))
+constNum <- sum(constCol, na.rm=T)
+if(constNum > 0){
+  message(paste("Positive ionization:", constNum, "features with a constant or single value across samples were found and deleted."))
+  pos <- pos[!constCol,,drop=FALSE]}
+
+varCol <- apply(t(neg), 2, var, na.rm=T)
+constCol <- (varCol == 0 | is.na(varCol))
+constNum <- sum(constCol, na.rm=T)
+if(constNum > 0){
+  message(paste("Negative ionization:", constNum, "features with a constant or single value across samples were found and deleted."))
+  neg <- neg[!constCol,,drop=FALSE]}
+```
+
+## Detect zeros and NAs
+
+```{r Check zeros and NAs, message=TRUE, warning=FALSE}
+totalCount <- nrow(pos)*ncol(pos)
+naCount <- sum(is.na(pos))
+naPercent <- round(100*naCount/totalCount, 1)
+message(paste("Positive ionization: A total of ", naCount, " (", naPercent, "%) missing values were detected.", sep=""))
+
+totalCount <- nrow(neg)*ncol(neg)
+naCount <- sum(is.na(neg))
+naPercent <- round(100*naCount/totalCount, 1)
+message(paste("Negative ionization: A total of ", naCount, " (", naPercent, "%) missing values were detected.", sep=""))
+```
+
+## Impute missing values
+
+Missing values were imputed using a random forest algorithm.
+
+```{r Impute missing values, message=FALSE, warning=FALSE}
+set.seed(2) #For reproducibility
+impute.pos<-missForest(t(pos), maxiter=10, ntree=500, verbose=TRUE)
+newpos<-impute.pos$ximp
+
+set.seed(2) #For reproducibility
+impute.neg<-missForest(t(neg), maxiter=10, ntree=500, verbose=TRUE)
+newneg<-impute.neg$ximp
+```
+
+## Data normalization
+
+Peak intensity values were normalized based on dissolved organic concentration (DOC) values.
+
+```{r Normalization, message=FALSE, warning=FALSE}
+tnewpos<-t(newpos)
+tnewneg<-t(newneg)
+
+for (i in 1:nrow(tnewpos)){tnewpos[i,]<-as.numeric(1000*tnewpos[i,]/doc$DOC)}
+for (i in 1:nrow(tnewneg)){tnewneg[i,]<-as.numeric(1000*tnewneg[i,]/doc$DOC)}
+```
+
+## Data transformation
+
+Normalized data were transformed using a generalized logarithmic transformation.
+
+```{r Transformation, message=FALSE, warning=FALSE}
+tnewpos<-log2((tnewpos+sqrt(tnewpos^2+1))/2)
+tnewneg<-log2((tnewneg+sqrt(tnewneg^2+1))/2)
+```
+
+# Principal component analysis
+
+Positive and negative ionisation data were merged for principal component analysis.
+
+```{r PCA, fig.height=3.15, fig.width=3.54, message=FALSE, warning=FALSE, fig.cap="Principal component analysis"}
+newpos<-t(tnewpos)
+newneg<-t(tnewneg)
+
+newpos<-newpos[-26,] #Remove soil 6 (outlier)
+newneg<-newneg[-26,] #Remove soil 6 (outlier)
+
+colnames(newpos)<-paste(colnames(newpos), "_pos", sep="")
+colnames(newneg)<-paste(colnames(newneg), "_neg", sep="")
+alldata<-cbind(newpos, newneg)
+
+#Do PCA
+pca<-PCA(alldata, ncp=5, scale.unit = TRUE, graph = FALSE)
+scores<-data.frame(Treatment=c(rep("Forbs", 10), rep("Grasses", 10), rep("CTL", 9)), pca$ind$coord)
+
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green)
+
+cex.axis<-8
+cex.title<-9
+cex.pt<-2
+
+p3<-ggplot(scores, aes(x=Dim.1, y=Dim.2, color=Treatment, shape=Treatment, fill=Treatment))+
+    theme_bw()+
+    geom_hline(yintercept=0, linetype=2)+
+    geom_vline(xintercept=0, linetype=2)+
+    stat_ellipse(geom="polygon", alpha=0.1)+
+    geom_point(size=cex.pt)+
+    scale_color_manual(values=cbPalette, name="Treatment")+
+    scale_fill_manual(values=cbPalette, name="Treatment")+
+    scale_shape_manual(values=c(16, 15, 17), name="Treatment")+
+    xlab(paste("PC1 (", round(pca$eig[1,2], 1) ," %)", sep=""))+
+    ylab(paste("PC2 (", round(pca$eig[2,2], 1) ," %)", sep=""))+
+    theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+          axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+          axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+          axis.text=element_text(size=cex.axis, color="black"),
+          strip.text = element_text(size=cex.title, face="italic"),
+          strip.background=element_rect(color="black"),
+          legend.position=c(0.885,0.91),
+          legend.background = element_blank(),
+          legend.key = element_blank(),
+          legend.text=element_text(size=7),
+          legend.key.size = unit(0.85,"line"),
+          legend.title = element_blank())
+
+p3
+
+#ggsave("PCA_positive+negative.tiff", p3, dpi=1000, compression="lzw", width=9, height=8, units="cm")
+
+scatter3d(x=scores$Dim.1, y=scores$Dim.2, z=scores$Dim.3, groups=scores$Treatment,
+          surface=FALSE, grid=TRUE, ellipsoid=TRUE, fill=TRUE,
+          surface.col=cbPalette,
+          xlab=paste("PC1 (", round(pca$eig[1,2], 1) ," %)", sep=""), 
+          zlab=paste("PC3 (", round(pca$eig[3,2], 1) ," %)", sep=""), 
+          ylab=paste("PC2 (", round(pca$eig[2,2], 1) ," %)", sep=""),
+          axis.col=rep("black", 3), sphere.size = 0.5, axis.scales = FALSE)
+
+#rgl.snapshot(filename="PCA_3D.png")
+```
+
+# Create Figure 2
+
+```{r Figure 2, fig.height=4.53, fig.width=7.87, message=FALSE, warning=FALSE, fig.cap="Figure 2"}
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green)
+
+cex.axis<-8
+cex.title<-9.5
+cex.pt<-1.5
+
+#Plot PCA
+p1<-ggplot(scores, aes(x=Dim.1, y=Dim.2, color=Treatment, shape=Treatment, fill=Treatment))+
+  theme_bw()+
+  geom_hline(yintercept=0, linetype=2)+
+  geom_vline(xintercept=0, linetype=2)+
+  stat_ellipse(geom="polygon", alpha=0.1)+
+  geom_point(size=cex.pt)+
+  scale_color_manual(values=cbPalette, name="Treatment")+
+  scale_fill_manual(values=cbPalette, name="Treatment")+
+  scale_shape_manual(values=c(16, 15, 17), name="Treatment")+
+  xlab(paste("PC1 (", round(pca$eig[1,2], 1) ,"%)", sep=""))+
+  ylab(paste("PC2 (", round(pca$eig[2,2], 1) ,"%)", sep=""))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        strip.text = element_text(size=cex.title, face="italic"),
+        strip.background=element_rect(color="black"),
+        legend.position="none")+
+  annotate("text", x=60, y=38, label="CTL", size=3, color=blue)+
+  annotate("text", x=-50, y=43, label="Forbs", size=3, color=yellow)+
+  annotate("text", x=75, y=-45, label="Grasses", size=3, color=green)
+
+#Plot metabolite richness
+p2<-ggplot(mdiversity, aes(x=Treatment, y=Richness.pos, fill=Treatment))+
+  geom_boxplot(alpha=0.5, outlier.shape = NA, width=0.5)+
+  geom_jitter(aes(x=Treatment, y=Richness.pos, fill=Treatment), shape=21, size=cex.pt, alpha=0.6,
+              position=position_jitter(width=0.2))+
+  theme_bw()+
+  xlab("")+
+  ylab("Metabolite richness")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x=element_text(size=cex.title, color="black"),
+        legend.position = "none")+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Plot abundance-diversity relationship
+p3<-ggplot(mdiversity, aes(x=DOC, y=Richness.pos, color=Treatment, shape=Treatment))+
+  geom_smooth(method="lm", se=FALSE, linetype=2, size=0.8)+
+  geom_smooth(data=mdiversity, mapping=aes(x=DOC, y=Richness.pos), inherit.aes = F, method="lm", color="black")+
+  geom_point(size=cex.pt)+
+  theme_bw()+
+  xlab(expression(paste("DOC (mg ", L^-1, ")")))+
+  ylab("Metabolite richness")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position="none")+
+  scale_color_manual(values=cbPalette)+
+  scale_shape_manual(values=c(16, 15, 17))
+
+#Plot alpha diversity
+alpha<-pos.part[pos.part$Diversity=="alpha",]
+levels(alpha$Treatment)[levels(alpha$Treatment)=="Tap"] <- "Tap water"
+
+p4<-ggplot(alpha, aes(x=q, y=Value, color=Treatment))+
+  geom_ribbon(aes(x=q, ymin=CIlow, ymax=CIhigh, fill=Treatment, alpha=Treatment), color=NA)+
+  geom_line(aes(linetype=Treatment))+
+  theme_bw()+
+  xlab("Diversity order (q)")+
+  ylab(expression(paste(alpha, " diversity", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position=c(0.78,0.78),
+        legend.background = element_blank(),
+        legend.key = element_blank(),
+        legend.text=element_text(size=7),
+        legend.key.size = unit(0.85,"line"),
+        legend.title = element_blank())+
+  scale_fill_manual(values=c(cbPalette, "black"))+
+  scale_color_manual(values=c(cbPalette, "black"))+
+  scale_alpha_manual(values=c(0.2,0.2,0.2,0))
+
+#Plot gamma diversity
+gamma<-pos.part[pos.part$Diversity=="gamma",]
+levels(gamma$Treatment)[levels(gamma$Treatment)=="Tap"] <- "Tap water"
+
+p5<-ggplot(gamma, aes(x=q, y=Value, color=Treatment))+
+  geom_ribbon(aes(x=q, ymin=CIlow, ymax=CIhigh, fill=Treatment, alpha=Treatment), color=NA)+
+  geom_line(aes(linetype=Treatment))+
+  theme_bw()+
+  xlab("Diversity order (q)")+
+  ylab(expression(paste(gamma, " diversity", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none")+
+  scale_fill_manual(values=c(cbPalette,"black"))+
+  scale_color_manual(values=c(cbPalette,"black"))+
+  scale_alpha_manual(values=c(0.2,0.2,0.2,0))
+
+#Plot turnover
+turnover<-pos.part[pos.part$Diversity=="turnover",]
+levels(turnover$Treatment)[levels(turnover$Treatment)=="Tap"] <- "Tap water"
+
+p6<-ggplot(turnover, aes(x=q, y=Value, color=Treatment))+
+  geom_ribbon(aes(x=q, ymin=CIlow, ymax=CIhigh, fill=Treatment, alpha=Treatment), color=NA)+
+  geom_line(aes(linetype=Treatment))+
+  theme_bw()+
+  xlab("Diversity order (q)")+
+  ylab(expression(paste("Turnover (", beta, " diversity)", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none")+
+  scale_fill_manual(values=c(cbPalette,"black"))+
+  scale_color_manual(values=c(cbPalette,"black"))+
+  scale_alpha_manual(values=c(0.2,0.2,0.2,0))
+
+#Create figure
+p<-ggarrange(p1,p2,p3,p4,p5,p6, nrow=2, ncol=3, align="hv", labels=c("(a)","(b)","(c)","(d)","(e)", "(f)"), font.label = list(size=10.5))
+
+p
+
+#ggsave("Figure2.tiff", p, dpi=1000, compression="lzw", width=20, height=11.5, units="cm")
+```
+
+# Create Figure S4
+
+```{r Figure S4, fig.height=4.53, fig.width=7.87, message=FALSE, warning=FALSE, fig.cap="Figure S4"}
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green)
+
+cex.axis<-7.5
+cex.title<-8.5
+cex.pt<-1.5
+
+#Plot PCA
+p1<-ggplot(scores, aes(x=Dim.1, y=Dim.2, color=Treatment, shape=Treatment, fill=Treatment))+
+  theme_bw()+
+  geom_hline(yintercept=0, linetype=2)+
+  geom_vline(xintercept=0, linetype=2)+
+  stat_ellipse(geom="polygon", alpha=0.1)+
+  geom_point(size=cex.pt)+
+  scale_color_manual(values=cbPalette, name="Treatment")+
+  scale_fill_manual(values=cbPalette, name="Treatment")+
+  scale_shape_manual(values=c(16, 15, 17), name="Treatment")+
+  xlab(paste("PC1 (", round(pca$eig[1,2], 1) ,"%)", sep=""))+
+  ylab(paste("PC2 (", round(pca$eig[2,2], 1) ,"%)", sep=""))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        strip.text = element_text(size=cex.title, face="italic"),
+        strip.background=element_rect(color="black"),
+        legend.position="none")+
+  annotate("text", x=60, y=35, label="CTL", size=2.5, color=blue)+
+  annotate("text", x=-50, y=43, label="Forbs", size=2.5, color=yellow)+
+  annotate("text", x=80, y=-42, label="Grasses", size=2.5, color=green)
+
+#Plot metabolite richness
+p2<-ggplot(mdiversity, aes(x=Treatment, y=Richness.neg, fill=Treatment))+
+  geom_boxplot(alpha=0.5, outlier.shape = NA, width=0.5)+
+  geom_jitter(aes(x=Treatment, y=Richness.neg, fill=Treatment), shape=21, size=cex.pt, alpha=0.6,
+              position=position_jitter(width=0.2))+
+  theme_bw()+
+  xlab("")+
+  ylab("Metabolite richness")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x=element_text(size=cex.title, color="black"),
+        legend.position = "none")+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Plot abundance-diversity relationship
+p3<-ggplot(mdiversity, aes(x=DOC, y=Richness.neg, color=Treatment, shape=Treatment))+
+  geom_smooth(method="lm", se=FALSE, linetype=2, size=0.8)+
+  geom_smooth(data=mdiversity, mapping=aes(x=DOC, y=Richness.neg), inherit.aes = F, method="lm", color="black")+
+  geom_point(size=cex.pt)+
+  theme_bw()+
+  xlab(expression(paste("Dissolved organic carbon (mg ", L^-1, ")")))+
+  ylab("Metabolite richness")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position="none")+
+  scale_color_manual(values=cbPalette)+
+  scale_shape_manual(values=c(16, 15, 17))
+
+#Plot alpha diversity
+alpha<-neg.part[neg.part$Diversity=="alpha",]
+levels(alpha$Treatment)[levels(alpha$Treatment)=="Tap"] <- "Tap water"
+
+p4<-ggplot(alpha, aes(x=q, y=Value, color=Treatment))+
+  geom_ribbon(aes(x=q, ymin=CIlow, ymax=CIhigh, fill=Treatment, alpha=Treatment), color=NA)+
+  geom_line(aes(linetype=Treatment))+
+  theme_bw()+
+  xlab("Diversity order (q)")+
+  ylab(expression(paste(alpha, " diversity", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position=c(0.78,0.78),
+        legend.background = element_blank(),
+        legend.key = element_blank(),
+        legend.text=element_text(size=7),
+        legend.key.size = unit(0.85,"line"),
+        legend.title = element_blank())+
+  scale_fill_manual(values=c(cbPalette, "black"))+
+  scale_color_manual(values=c(cbPalette, "black"))+
+  scale_alpha_manual(values=c(0.2,0.2,0.2,0))
+
+#Plot gamma diversity
+gamma<-neg.part[neg.part$Diversity=="gamma",]
+levels(gamma$Treatment)[levels(gamma$Treatment)=="Tap"] <- "Tap water"
+
+p5<-ggplot(gamma, aes(x=q, y=Value, color=Treatment))+
+  geom_ribbon(aes(x=q, ymin=CIlow, ymax=CIhigh, fill=Treatment, alpha=Treatment), color=NA)+
+  geom_line(aes(linetype=Treatment))+
+  theme_bw()+
+  xlab("Diversity order (q)")+
+  ylab(expression(paste(gamma, " diversity", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none")+
+  scale_fill_manual(values=c(cbPalette,"black"))+
+  scale_color_manual(values=c(cbPalette,"black"))+
+  scale_alpha_manual(values=c(0.2,0.2,0.2,0))
+
+#Plot turnover
+turnover<-neg.part[neg.part$Diversity=="turnover",]
+levels(turnover$Treatment)[levels(turnover$Treatment)=="Tap"] <- "Tap water"
+
+p6<-ggplot(turnover, aes(x=q, y=Value, color=Treatment))+
+  geom_ribbon(aes(x=q, ymin=CIlow, ymax=CIhigh, fill=Treatment, alpha=Treatment), color=NA)+
+  geom_line(aes(linetype=Treatment))+
+  theme_bw()+
+  xlab("Diversity order (q)")+
+  ylab(expression(paste("Turnover (", beta, " diversity)", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none")+
+  scale_fill_manual(values=c(cbPalette,"black"))+
+  scale_color_manual(values=c(cbPalette,"black"))+
+  scale_alpha_manual(values=c(0.2,0.2,0.2,0))
+
+#Create figure
+p<-ggarrange(p1,p2,p3,p4,p5,p6, nrow=2, ncol=3, align="hv", labels=c("(a)","(b)","(c)","(d)","(e)", "(f)"), font.label = list(size=10.5))
+
+p
+
+#ggsave("FigureS4.tiff", p, dpi=1000, compression="lzw", width=20, height=11.5, units="cm")
+```
+
+# Discriminant metabolites
+
+Detection of the most dicriminant metabolites was performed using a random forest approach. First, a random forest model was fitted to metabolomics data using 1000 trees and a combination of model hyperparameters that minimised the out-of-bag error. Second, the most discriminant features were detected using the [Boruta](https://cran.r-project.org/web/packages/Boruta/Boruta.pdf) R package.
+
+## Tune model hyperparameters
+
+```{r Tune RF model, message=FALSE, warning=FALSE}
+data_train<-data.frame(Treatment=as.character(sapply(rownames(newpos), function(x){strsplit(x, "_")[[1]][1]})), newpos, newneg)
+
+#Tune model hyperparameters (ntree, mtry, nodesize, sampsize)
+#Best model selected based on OOB error ("out of bag")
+#!This is time consuming!
+
+#Number of variables randomly sampled as candidates at each split.
+mtry <- seq(50, 300, 50)
+#Minimum size of terminal nodes. Setting this number larger causes smaller trees to be grown (and thus takes less time).
+nodesize <- seq(1, 51, 10)
+#Size(s) of sample to draw.
+sampsize <- seq(15, 25, 2)
+
+hyper_grid <- expand.grid(mtry = mtry, nodesize = nodesize, sampsize = sampsize)
+
+oob_err <- c()
+
+#pb <- txtProgressBar(min = 1, max = nrow(hyper_grid), initial = 1, style=3)
+
+# Write a loop over the rows of hyper_grid
+for (i in 1:nrow(hyper_grid)) {
+    
+    #setTxtProgressBar(pb,i)
+    
+    # Train a Random Forest model
+    set.seed(2)
+    model <- randomForest(formula = Treatment ~ ., 
+                          data = data_train,
+                          mtry = hyper_grid$mtry[i],
+                          nodesize = hyper_grid$nodesize[i],
+                          sampsize = hyper_grid$sampsize[i])
+    
+    # Store OOB error for the model                      
+    oob_err[i] <- model$err.rate[nrow(model$err.rate), "OOB"]}
+
+# Identify optimal set of hyperparameters based on OOB error
+besti<-which.min(oob_err)
+best<-hyper_grid[besti,]
+print(best)
+```
+
+## Fit random forest model
+
+```{r Fit RF model, message=FALSE, warning=FALSE}
+set.seed(2) #For reproducibility
+model <- randomForest(formula = Treatment ~ ., 
+                      data = data_train,
+                      ntree=1000,
+                      mtry = best$mtry,
+                      nodesize = best$nodesize,
+                      sampsize = best$sampsize,
+                      importance=TRUE,
+                      proximity=TRUE)
+
+print(model)
+
+set.seed(2) #For reproducibility
+boruta_train<-Boruta(Treatment ~ ., data_train, ntree=1000, mtry = best$mtry, maxRuns=1000)
+print(boruta_train)
+boruta_stat<-attStats(boruta_train)
+boruta_confirmed<-boruta_stat[boruta_stat$decision=="Confirmed",]
+boruta_confirmed<-boruta_confirmed[rev(order(boruta_confirmed$meanImp)),]
+```
+
+## Plot 20 most discriminant metabolites
+
+```{r Plot discriminant metabolites, fig.height=8.27, fig.width=7.87, message=FALSE, warning=FALSE}
+data_sigvar<-data_train[,c("Treatment", rownames(boruta_confirmed)[1:20])]
+data_sigvar<-data.frame(Treatment=as.character(rep(data_sigvar$Treatment, 20)),
+                        Feature=as.character(rep(colnames(data_sigvar)[2:21], each=29)),
+                        Intensity=as.numeric(as.vector(as.matrix(data_sigvar[,2:21]))))
+
+data_sigvar$Feature<-as.character(data_sigvar$Feature)
+
+data_sigvar$Feature<-factor(data_sigvar$Feature, levels=unique(data_sigvar$Feature))
+
+yellow<-"#C9B75E"
+green<-"#0C6C67"
+blue<-"#11264B"
+
+cbPalette <- c(blue, yellow, green)
+
+cex.axis<-8
+cex.title<-10
+cex.pt<-1.3
+cex.strip<-7
+
+p7<-ggplot(data_sigvar, aes(x=Treatment, y=Intensity, fill=Treatment))+
+  facet_wrap(~Feature, ncol=4, scales="free_y")+
+  geom_boxplot(alpha=0.4, outlier.shape = NA, width=0.6)+
+  geom_jitter(aes(x=Treatment, y=Intensity, fill=Treatment), shape=21, size=cex.pt, alpha=0.6, position=position_jitter(width=0.2))+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste(glog[2],"(peak intensity)")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none",
+        strip.text = element_text(size=cex.strip))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+p7
+
+#ggsave("Important_metabolites.tiff", p7, dpi=1000, compression="lzw", width=20, height=21, units="cm")
+```
+
+# Detect unique features
+
+Find features that were only detected in CTL, Forbs, or Grasses.
+
+```{r Detect unique features, message=FALSE, warning=FALSE}
+data_venn<-rbind(pos, neg)
+rownames(data_venn)<-c(paste(rownames(pos), "_pos", sep=""),
+                       paste(rownames(neg), "_neg", sep=""))
+
+data_venn<-t(data_venn)
+
+data_venn[is.na(data_venn)==FALSE]<-1
+data_venn[is.na(data_venn)==TRUE]<-0
+
+data_venn<-data.frame(Treatment=c(rep("Forbs", 10), rep("Grasses", 10), rep("CTL", 10)),
+                      data_venn)
+data_venn<-data_venn[-26,] #Remove soil 6
+data_venn.sum<-aggregate(data_venn[,2:ncol(data_venn)], by=list(Treatment=data_venn$Treatment), sum)
+```
+
+## CTL
+
+```{r Unique features CTL, message=FALSE, warning=FALSE}
+onlyctl<-c()
+k<-0
+
+for (i in 2:ncol(data_venn.sum)){
+  
+  if (data_venn.sum[1,i]>0 & data_venn.sum[2,i]==0 & data_venn.sum[3,i]==0){
+    k<-k+1
+    onlyctl[k]<-i}}
+
+onlyctl<-colnames(data_venn.sum)[onlyctl]
+onlyctl<-data.frame(Feature=onlyctl, Frequency=as.numeric(data_venn.sum[1, onlyctl]))
+knitr::kable(onlyctl, caption = "Features only detected in CTL samples")
+```
+
+## Forbs
+
+```{r Unique features Forbs, message=FALSE, warning=FALSE}
+onlyforbs<-c()
+k<-0
+
+for (i in 2:ncol(data_venn.sum)){
+  
+  if (data_venn.sum[1,i]==0 & data_venn.sum[2,i]>0 & data_venn.sum[3,i]==0){
+    k<-k+1
+    onlyforbs[k]<-i}}
+
+onlyforbs<-colnames(data_venn.sum)[onlyforbs]
+onlyforbs<-data.frame(Feature=onlyforbs, Frequency=as.numeric(data_venn.sum[2, onlyforbs]))
+knitr::kable(onlyforbs, caption = "Features only detected in Forbs samples")
+```
+
+## Grasses
+
+```{r Unique features Grasses, message=FALSE, warning=FALSE}
+onlygrasses<-c()
+k<-0
+
+for (i in 2:ncol(data_venn.sum)){
+  
+  if (data_venn.sum[1,i]==0 & data_venn.sum[2,i]==0 & data_venn.sum[3,i]>0){
+    k<-k+1
+    onlygrasses[k]<-i}}
+
+onlygrasses<-colnames(data_venn.sum)[onlygrasses]
+onlygrasses<-data.frame(Feature=onlygrasses, Frequency=as.numeric(data_venn.sum[3, onlygrasses]))
+knitr::kable(onlygrasses, caption = "Features only detected in Grasses samples")
+```

@@ -1,0 +1,74 @@
+---
+title: "Rhizosphere metabolome project - analysis of nutrient data"
+author: "Benjamin Delory"
+date: "31/08/2020"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+    fig_caption: TRUE
+---
+
+This document details the R pipeline used to visualize differences in nutrient concentration between soil solution samples collected during the first step (step 1) of the experiment presented in **Delory et al (2020) The rhizosphere metabolome triggers species-specific and context-dependent root responses in later arriving plants**. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center")
+```
+
+# Load R packages
+
+```{r Load R packages, warning=FALSE, message=FALSE}
+library(ggplot2)
+```
+
+# Load data in R
+
+```{r Load data in R, message=FALSE, warning=FALSE}
+data <- read.csv("C:/Users/Delory/Documents/GitHub/rhizometabolome/data/Data_nutrients.csv", header = TRUE, stringsAsFactors = FALSE)
+
+data$When[data$When=="Before"]<-"BEFORE nutrient addition"
+data$When[data$When=="After"]<-"AFTER nutrient addition"
+
+data$Treatment[data$Treatment=="Control"]<-"CTL"
+
+data$When<-factor(data$When, levels=c("BEFORE nutrient addition", "AFTER nutrient addition"))
+```
+
+# Plot results
+
+```{r Plot results, fig.height=3.54, fig.width=5.51, message=FALSE, warning=FALSE}
+cbPalette <- c("#11264B", "#C9B75E", "#0C6C67")
+cex.axis<-9
+cex.title<-10
+
+p<-ggplot(data, aes(x=Element, y=Concentration, fill=Treatment))+
+        geom_bar(position="dodge2", stat="identity")+
+        theme_bw()+
+        facet_wrap(~When)+
+        scale_x_discrete(limits=c("N","P","K","Ca","Mg"),
+                         labels=c(expression(NO[3]^"-"),
+                                  expression(PO[4]^"3-"),
+                                  expression(K^"+"),
+                                  expression(Ca^"2+"),
+                                  expression(Mg^"2+")))+
+        scale_fill_manual(values=cbPalette)+
+        scale_y_continuous(limits=c(0,70), breaks=seq(0,70,by=10))+
+        xlab("")+
+        ylab(expression(paste("Nutrient concentration (mg ", L^-1, ")")))+
+        theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+              axis.title.y=element_text(margin = margin(t = 0, r = 10, b = 0, l = 0)),
+              legend.title=element_blank(),
+              legend.position="top",
+              legend.key.size = unit(0.6,"line"),
+              legend.background = element_rect(fill=NA),
+              legend.text=element_text(color="black"),
+              axis.text=element_text(size=cex.axis, color="black"),
+              strip.text = element_text(size=10, color="black"),
+              strip.background=element_rect(color="black"),
+              panel.grid=element_blank())
+
+p
+
+#ggsave(p, filename = "Nutrients_exudates.tiff", dpi=600, compression="lzw", width=14, height=9, units="cm")
+```
+

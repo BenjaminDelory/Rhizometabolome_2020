@@ -1,0 +1,1592 @@
+---
+title: "Rhizosphere metabolome project - analysis of plant data"
+author: "Benjamin Delory"
+date: "31/08/2020"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+    fig_caption: TRUE
+editor_options: 
+  chunk_output_type: console
+---
+
+This document details the R pipeline used to explore and analyse the data presented in **Delory et al (2020) The rhizosphere metabolome triggers species-specific and context-dependent root responses in later arriving plants**. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center")
+```
+
+# Load R packages
+
+```{r Load R packages, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(gridExtra)
+library(ggpubr)
+library(smatr)
+library(FactoMineR)
+library(piecewiseSEM)
+```
+
+# Create R functions for data analysis
+
+## `bootstrap_mean`
+
+`bootstrap_mean` is an R function calculating treatment means, compatibility intervals (bootstrap resampling using the percentile method), and effect sizes for one response variable. The number of bootstrap resamples is set using `n_perm` (default to 10000).
+
+This function is a modified version of the [function coded by Masahiro Ryo](https://github.com/masahiroryo/joint-ES-estimate/blob/master/20190801_analysis_v2.0.R) for the following paper: [Rillig et al (2019). The role of multiple global change factors in driving soil functions and microbial biodiversity. Science, 366, 886-890](https://science.sciencemag.org/content/366/6467/886).
+
+```{r bootstrap_mean, message=TRUE, warning=TRUE}
+bootstrap_mean <- function(response, data=data, n_perm = 10000){
+  
+  summary <- data.frame(Species=NA, Treatment=NA, lowCI=NA, mean=NA, highCI=NA)
+  species <- sort(unique(data$Species))
+  treatments <- sort(unique(data$Treatment))
+  row<-0
+  
+  for (sp in species){
+  
+    for (treat in treatments){
+      
+      bs <- numeric(0)
+      population <- na.omit(data[data$Treatment==treat & data$Species==sp, response])
+      size <- length(population)
+      
+      if (size!=0){
+        
+        row<-row+1
+        
+        set.seed(1) #For reproducibility
+      
+        for (i in c(1:n_perm)){
+          
+          k <- mean(sample(population, size, replace = T))
+          bs <- append(bs, k)}
+        
+        summary[row,1:2] <- c(sp, treat)
+        summary[row,3:5] <- c(quantile(bs, .025), mean(population), quantile(bs, .975))}}}
+  
+  summary$ES<-NA
+  summary$ES[summary$Species=="Dianthus deltoides"]<-100*(summary$mean[summary$Species=="Dianthus deltoides"]-summary$mean[summary$Species=="Dianthus deltoides" & summary$Treatment=="Soil"])/summary$mean[summary$Species=="Dianthus deltoides" & summary$Treatment=="Soil"]
+  summary$ES[summary$Species=="Festuca rubra"]<-100*(summary$mean[summary$Species=="Festuca rubra"]-summary$mean[summary$Species=="Festuca rubra" & summary$Treatment=="Soil"])/summary$mean[summary$Species=="Festuca rubra" & summary$Treatment=="Soil"]
+  
+  return(summary)}
+```
+
+## `bootstrap_ES`
+
+`bootstrap_ES` is an R function calculating unstandardised effect sizes for each treatment and their compatibility intervals (bootstrap resampling using the percentile method) for one response variable. The number of bootstrap resamples is set using `n_perm` (default to 10000). The argument `plot` can be used to create a histogram displaying the results.
+
+This function is a modified version of the [function coded by Masahiro Ryo](https://github.com/masahiroryo/joint-ES-estimate/blob/master/20190801_analysis_v2.0.R) for the following paper: [Rillig et al (2019). The role of multiple global change factors in driving soil functions and microbial biodiversity. Science, 366, 886-890](https://science.sciencemag.org/content/366/6467/886).
+
+```{r bootstrap_ES, message=FALSE, warning=FALSE}
+bootstrap_ES <- function(response, data=data, n_perm = 10000, plot=TRUE){
+  
+  summary <- data.frame(Species=NA, Contrast=NA, lowCI=NA, ES=NA, highCI=NA)
+  alles <- data.frame()
+  species <- sort(unique(data$Species))
+  treatments <- sort(unique(data$Treatment))
+  comb<-combn(treatments, 2)
+  row<-0
+  
+  for (sp in species){
+    
+    for (col in 1:ncol(comb)){
+      
+      bs <- numeric(0)
+      population_1 <- na.omit(data[data$Treatment==comb[1,col] & data$Species==sp, response])
+      population_2 <- na.omit(data[data$Treatment==comb[2,col] & data$Species==sp, response])
+      size_1 <- length(population_1)
+      size_2 <- length(population_2)
+      
+      if (size_1==0|size_2==0){} else {
+        
+        row<-row+1
+        
+        set.seed(1) #For reproducibility
+      
+        for (i in c(1:n_perm)){
+          
+          k_1 <- mean(sample(population_1, size_1, replace = T))
+          k_2 <- mean(sample(population_2, size_2, replace = T))
+          bs <- append(bs, k_1-k_2)}
+      
+      summary[row,1:2] <- c(sp, paste(comb[1,col], "-", comb[2,col], sep=""))
+      summary[row,3:5] <- c(quantile(bs, .025), mean(population_1)-mean(population_2), quantile(bs, .975))
+      alles<-rbind(alles, data.frame(Species=rep(sp, n_perm), Contrast=rep(paste(comb[1,col], "-", comb[2,col], sep=""), n_perm), ES=bs))}
+  
+      if (plot==TRUE){
+        hist(bs, main=paste(sp, " : ", comb[1,col], "-", comb[2,col], sep=""),
+             xlab=paste("ES", response, sep=" "))
+        points(mean(population_1)-mean(population_2), 0, pch=16, cex=2, col="red")
+        segments(x0=quantile(bs, .025), y0=0, x1=quantile(bs, .975), y1=0, lwd=2, col="red")}}}
+  
+  return(list(summary=summary, bootstrap=alles))}
+```
+
+# Load data in R
+
+```{r Load data in R, message=FALSE, warning=FALSE}
+data<-read.csv("C:/Users/Delory/Documents/GitHub/rhizometabolome/data/Data_plants.csv", header=TRUE)
+data<-as.data.frame(data)
+data$Species<-factor(data$Species)
+levels(data$Species)<-c("Dianthus deltoides", "Festuca rubra")
+```
+
+# Unit conversion
+
+```{r Unit conversion, message=FALSE, warning=FALSE}
+data$LDMC<-data$LDMC*10 #Express leaf dry matter content in mg/g
+data$Nleaf<-data$Nleaf*10 #Express leaf nitrogen content in mg/g
+data$Cleaf<-data$Cleaf*10 #Express leaf carbon content in mg/g
+data$Nroot<-data$Nroot*10 #Express root nitrogen content in mg/g
+data$Croot<-data$Croot*10 #Express root carbon content in mg/g
+data$Nshoot<-data$Nshoot*10 #Express shoot nitrogen content in mg/g
+data$Cshoot<-data$Cshoot*10 #Express shoot carbon content in mg/g
+data$LDW<-data$LDW*100 #Express leaf dry weight in mg/leaf
+data$LA<-data$LA/10 #Express leaf area in cm²/leaf
+data$SRL<-data$SRL/100 #Express specific root length in m/g
+data$SRA<-data$SRA/10000 #Express specific root surface area in m²/g
+data$RTD<-data$RTD*1000 #Express root tissue density in mg/cm³
+data$SMF<-data$SMF*1000 #Express shoot mass fraction in mg/g
+data$RMF<-data$RMF*1000 #Express root mass fraction in mg/g
+data$Nuptake<-data$Nuptake*1000 #Express N uptake in mg
+```
+
+# Data filtering
+
+Our dataset contains measurements acquired on 60 plants, but two plants had to be removed from the dataset:
+
+* Plant 3: received 50 ml instead of 25 ml of soil solution at day 2 (manipulation error).  
+* Plant 22: individual with a very different phenotype in comparison with the others (outlier).
+
+```{r Data filtering, message=FALSE, warning=FALSE}
+data<-data[-c(3,22),]
+```
+
+# PCA on all functional traits
+
+A principal component analysis was performed using root and leaf functional traits measured on *Dianthus deltoides* and *Festuca rubra*. The goal of this analysis was to visualise functional differences between the two focal species used in the experiment.
+
+```{r PCA functional traits, message=FALSE, warning=FALSE, fig.width=3.94, fig.height=6.69}
+datapca<-data[,c("Treatment", "Species", "LDW", "Chl50", "SLA", "LA", "LDMC", "Nleaf", "Cleaf", "CNleaf", "SRL", "SRA", "RTD", "D", "Nroot", "Croot", "CNroot")]
+datapca<-na.omit(datapca)
+
+pca<-PCA(datapca, quali.sup=1:2, scale.unit=T, ncp=2, graph=FALSE)
+
+ind<-data.frame(datapca[,1:2], pca$ind$coord)
+
+cbPalette <- c("#C9B75E", "#0C6C67")
+
+cex.axis<-9
+cex.title<-10
+cex.pt<-2
+
+plotvar<-plot(pca, choix="var", graph.type = "ggplot")+
+      xlab(paste("PC1 (", round(pca$eig[1,2], 1), "%)", sep=""))+
+      ylab(paste("PC2 (", round(pca$eig[2,2], 1), "%)", sep=""))+
+      theme_bw()+
+      theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+            axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+            axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+            axis.text=element_text(size=cex.axis, color="black"),
+            strip.text = element_text(size=cex.title, face="italic"),
+            strip.background=element_rect(color="black"))+
+      ggtitle("")
+
+plotind<-ggplot(ind, aes(x=Dim.1, y=Dim.2, color=Species))+
+      theme_bw()+
+      geom_point(size=cex.pt, alpha=0.9, shape=16)+
+      stat_ellipse()+
+      geom_hline(yintercept=0)+
+      geom_vline(xintercept=0)+
+      scale_color_manual(values=cbPalette, name="Species")+
+      xlab(paste("PC1 (", round(pca$eig[1,2], 1), "%)", sep=""))+
+      ylab(paste("PC2 (", round(pca$eig[2,2], 1), "%)", sep=""))+
+      theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+            axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+            axis.title.x=element_text(margin = margin(t = 5, r = 0, b = 0, l = 0)),
+            axis.text=element_text(size=cex.axis, color="black"),
+            strip.text = element_text(size=cex.title, face="italic"),
+            strip.background=element_rect(color="black"),
+            legend.position = "none")+
+      coord_fixed()+
+      annotate("text", x=-2.1, y=3.4, label="Dianthus\ndeltoides", size=3, color="#C9B75E", fontface="italic")+
+      annotate("text", x=4.7, y=3.7, label="Festuca\nrubra", size=3, color="#0C6C67", fontface="italic")
+
+plotpca<-ggarrange(plotvar, plotind, ncol=1, nrow=2, labels=c("(a)", "(b)"), heights=c(1,0.75), align="v")
+
+plotpca
+
+#ggsave("PCA_traits.tiff", plotpca, dpi=1000, compression="lzw", width=10, height=17, units="cm")
+```
+
+# Biomass production and allocation
+
+## Allometric analysis
+
+```{r Allometric analysis, message=FALSE, warning=FALSE}
+model.dd<-sma(SDW~RDW*Treatment, data[data$Species=="Dianthus deltoides",])
+plot(model.dd, main="Dianthus deltoides", xlab="Root dry weight (g)", ylab="Shoot dry weight (g)")
+summary(model.dd)
+
+model.fr<-sma(SDW~RDW*Treatment, data[data$Species=="Festuca rubra",])
+plot(model.fr, main="Festuca rubra", xlab="Root dry weight (g)", ylab="Shoot dry weight (g)")
+summary(model.fr)
+```
+
+## Plot results
+
+```{r Plot biomass, fig.height=3.78, fig.width=7.09, message=FALSE, warning=FALSE}
+stat_sdw<-bootstrap_mean(response="SDW", data=data, n_perm=10000)
+knitr::kable(stat_sdw, caption="Results for shoot dry weight (mean in g, ES in %)")
+stat_rdw<-bootstrap_mean(response="RDW", data=data, n_perm=10000)
+knitr::kable(stat_rdw, caption="Results for root dry weight (mean in g, ES in %)")
+stat_smf<-bootstrap_mean(response="SMF", data=data, n_perm=10000)
+knitr::kable(stat_smf, caption="Results for shoot mass fraction (mean in mg/g, ES in %)")
+stat_rmf<-bootstrap_mean(response="RMF", data=data, n_perm=10000)
+knitr::kable(stat_rmf, caption="Results for root mass fraction (mean in mg/g, ES in %)")
+
+cbPalette <- c("#C9B75E", "#0C6C67", "#11264B")
+
+cex.axis<-7.5
+cex.title<-8.5
+cex.pt<-1.2
+
+#SDW: shoot dry weight
+
+sdw<-ggplot(data, aes(x=Treatment, y=SDW, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=SDW, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=SDW, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.5, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab("Shoot dry weight (g)")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 3, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x=element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=cex.title, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_y_continuous(limits=c(0,0.6), breaks=seq(0,0.6,by=0.2))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#RDW: root dry weight
+
+rdw<-ggplot(data, aes(x=Treatment, y=RDW, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=RDW, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=RDW, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.5, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab("Root dry weight (g)")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 3, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#SMF: shoot mass fraction
+
+smf<-ggplot(data, aes(x=Treatment, y=SMF, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=SMF, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=SMF, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.5, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("SMF (mg ", g^-1, ")")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 3, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x=element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=cex.title, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#RMF: root mass fraction
+
+rmf<-ggplot(data, aes(x=Treatment, y=RMF, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=RMF, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=RMF, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.5, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("RMF (mg ", g^-1, ")")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 3, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+p<-ggarrange(sdw, smf, rdw, rmf, nrow=2, ncol=2, align="v", labels=c("(a)", "(c)", "(b)", "(d)"), 
+             font.label=list(size=10))
+p
+
+#ggsave("Biomass_production_allocation.tiff", p, dpi=1000, compression="lzw", width=18, height=18/(15/8), units="cm")
+```
+
+## Plot unstandardised effect sizes
+
+```{r Plot biomass effect sizes, fig.height=3.78, fig.width=7.09, message=FALSE, warning=FALSE}
+es_sdw<-bootstrap_ES(response="SDW", data=data, n_perm=10000, plot=FALSE)
+es_rdw<-bootstrap_ES(response="RDW", data=data, n_perm=10000, plot=FALSE)
+es_smf<-bootstrap_ES(response="SMF", data=data, n_perm=10000, plot=FALSE)
+es_rmf<-bootstrap_ES(response="RMF", data=data, n_perm=10000, plot=FALSE)
+
+cex.axis<-7.5
+cex.title<-8.5
+cex.pt<-1.2
+cex.mean<-2
+
+cbPalette <- c("#11264B", "#C9B75E", "#0C6C67")
+
+#SDW: shoot dry weight
+
+sdw<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_sdw$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_sdw$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.5, inherit.aes = F)+
+  geom_point(data=es_sdw$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab("ES SDW (g)")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x=element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=cex.title, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_x_discrete(limits=c("Forbs-Grasses", "Forbs-Soil", "Grasses-Soil"),
+                   labels=c("F-G", "F-CTL", "G-CTL"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#RDW: root dry weight
+
+rdw<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_rdw$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_rdw$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.5, inherit.aes = F)+
+  geom_point(data=es_rdw$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab("ES RDW (g)")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Forbs-Grasses", "Forbs-Soil", "Grasses-Soil"),
+                   labels=c("F-G", "F-CTL", "G-CTL"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#SMF: shoot mass fraction
+
+smf<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_smf$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_smf$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.5, inherit.aes = F)+
+  geom_point(data=es_smf$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES SMF (mg ", g^-1, ")")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = -8, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x=element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=cex.title, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_x_discrete(limits=c("Forbs-Grasses", "Forbs-Soil", "Grasses-Soil"),
+                   labels=c("F-G", "F-CTL", "G-CTL"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#RMF: root mass fraction
+
+rmf<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_rmf$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_rmf$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.5, inherit.aes = F)+
+  geom_point(data=es_rmf$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES RMF (mg ", g^-1, ")")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = -8, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Forbs-Grasses", "Forbs-Soil", "Grasses-Soil"),
+                   labels=c("F-G", "F-CTL", "G-CTL"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+p<-ggarrange(sdw, smf, rdw, rmf, nrow=2, ncol=2, align="v", labels=c("(a)", "(c)", "(b)", "(d)"), 
+             font.label=list(size=10))
+p
+
+#ggsave("Biomass_production_allocation_ES.tiff", p, dpi=1000, compression="lzw", width=18, height=18/(15/8), units="cm")
+```
+
+# Leaf functional traits
+
+## Plot results
+
+```{r Plot leaf traits, fig.height=7.9, fig.width=8.3, message=FALSE, warning=FALSE}
+stat_ldw<-bootstrap_mean(response="LDW", data=data, n_perm=10000)
+knitr::kable(stat_ldw, caption="Results for dry weight of a leaf (mean in mg, ES in %)")
+stat_chl50<-bootstrap_mean(response="Chl50", data=data, n_perm=10000)
+knitr::kable(stat_chl50, caption="Results for leaf chlorophyll concentration (mean in mg/m², ES in %)")
+stat_sla<-bootstrap_mean(response="SLA", data=data, n_perm=10000)
+knitr::kable(stat_sla, caption="Results for specific leaf area (mean in cm²/g, ES in %)")
+stat_la<-bootstrap_mean(response="LA", data=data, n_perm=10000)
+knitr::kable(stat_la, caption="Results for area of a leaf (mean in cm², ES in %)")
+stat_ldmc<-bootstrap_mean(response="LDMC", data=data, n_perm=10000)
+knitr::kable(stat_ldmc, caption="Results for leaf dry matter content (mean in mg/g, ES in %)")
+stat_nleaf<-bootstrap_mean(response="Nleaf", data=data, n_perm=10000)
+knitr::kable(stat_nleaf, caption="Results for leaf N concentration (mean in mg/g, ES in %)")
+stat_cleaf<-bootstrap_mean(response="Cleaf", data=data, n_perm=10000)
+knitr::kable(stat_cleaf, caption="Results for leaf C concentration (mean in mg/g, ES in %)")
+stat_cnleaf<-bootstrap_mean(response="CNleaf", data=data, n_perm=10000)
+knitr::kable(stat_cnleaf, caption="Results for leaf C:N (ES in %)")
+
+cex.axis<-9
+cex.title<-10
+cex.pt<-1.5
+
+cbPalette <- c("#C9B75E", "#0C6C67", "#11264B")
+
+#LDW
+
+p1<-ggplot(data, aes(x=Treatment, y=LDW, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=LDW, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=LDW, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("Leaf DW (mg ", leaf^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=10, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Chl50
+
+p2<-ggplot(data, aes(x=Treatment, y=Chl50, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=Chl50, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=Chl50, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("[Chl] (mg ", m^-2, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 7, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#SLA
+
+p3<-ggplot(data, aes(x=Treatment, y=SLA, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=SLA, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=SLA, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("SLA (", cm^2, " ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(vjust=0.5, margin = margin(t = 0, r = 7, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#LA
+
+p4<-ggplot(data, aes(x=Treatment, y=LA, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=LA, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=LA, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("Leaf area (cm² ", leaf^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#LDMC
+
+p5<-ggplot(data, aes(x=Treatment, y=LDMC, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=LDMC, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=LDMC, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("LDMC (mg ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 7, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=10, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Nleaf
+
+p6<-ggplot(data, aes(x=Treatment, y=Nleaf, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=Nleaf, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=Nleaf, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("Leaf N (mg ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Cleaf
+
+p7<-ggplot(data, aes(x=Treatment, y=Cleaf, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=Cleaf, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=Cleaf, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("Leaf C (mg ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 7, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#CN ratio
+
+p8<-ggplot(data, aes(x=Treatment, y=CNleaf, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=CNleaf, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=CNleaf, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab("Leaf C:N")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+p9<-ggarrange(p1,p5,p2,p6,p3,p7,p4,p8, nrow=4, ncol=2, align="v", 
+              labels=c("(a)", "(e)", "(b)", "(f)", "(c)", "(g)", "(d)", "(h)"),
+              font.label = list(size=11))
+
+p9
+
+#ggsave("Leaf_traits.tiff", p9, dpi=1000, compression="lzw", width=21, height=20, units="cm")
+```
+
+## Plot unstandardised effect sizes
+
+```{r Plot effect sizes leaf traits, fig.height=7.9, fig.width=8.3, message=FALSE, warning=FALSE}
+es_ldw<-bootstrap_ES(response="LDW", data=data, n_perm=10000, plot=FALSE)
+es_chl50<-bootstrap_ES(response="Chl50", data=data, n_perm=10000, plot=FALSE)
+es_sla<-bootstrap_ES(response="SLA", data=data, n_perm=10000, plot=FALSE)
+es_la<-bootstrap_ES(response="LA", data=data, n_perm=10000, plot=FALSE)
+es_ldmc<-bootstrap_ES(response="LDMC", data=data, n_perm=10000, plot=FALSE)
+es_nleaf<-bootstrap_ES(response="Nleaf", data=data, n_perm=10000, plot=FALSE)
+es_cleaf<-bootstrap_ES(response="Cleaf", data=data, n_perm=10000, plot=FALSE)
+es_cnleaf<-bootstrap_ES(response="CNleaf", data=data, n_perm=10000, plot=FALSE)
+
+cex.axis<-9
+cex.title<-10
+cex.pt<-1.5
+cex.mean<-2.5
+
+cbPalette <- c("#11264B", "#C9B75E", "#0C6C67")
+
+#LDW
+
+p1<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept=0)+
+  stat_ydensity(data=es_ldw$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_ldw$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_ldw$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES LDW (mg ", leaf^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=10, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Chl50
+
+p2<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept=0)+
+  stat_ydensity(data=es_chl50$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_chl50$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_chl50$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES [Chl] (mg ", m^-2, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#SLA
+
+p3<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_sla$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_sla$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_sla$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES SLA (", cm^2, " ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(vjust=0.5, margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#LA
+
+p4<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept=0)+
+  stat_ydensity(data=es_la$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_la$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_la$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES LA (cm² ", leaf^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Forbs-Grasses", "Forbs-Soil", "Grasses-Soil"),
+                   labels=c("F-G", "F-CTL", "G-CTL"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#LDMC
+
+p5<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_ldmc$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_ldmc$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_ldmc$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES LDMC (mg ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = -10, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=10, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Nleaf
+
+p6<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_nleaf$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_nleaf$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_nleaf$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES leaf N (mg ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = -10, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Cleaf
+
+p7<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_cleaf$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_cleaf$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_cleaf$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES leaf C (mg ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = -10, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#CN ratio
+
+p8<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_cnleaf$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_cnleaf$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_cnleaf$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab("ES leaf C:N")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = -10, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Forbs-Grasses", "Forbs-Soil", "Grasses-Soil"),
+                   labels=c("F-G", "F-CTL", "G-CTL"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+p9<-ggarrange(p1,p5,p2,p6,p3,p7,p4,p8, nrow=4, ncol=2, align="v", 
+              labels=c("(a)", "(e)", "(b)", "(f)", "(c)", "(g)", "(d)", "(h)"),
+              font.label = list(size=11))
+
+p9
+
+#ggsave("Leaf_traits_ES.tiff", p9, dpi=1000, compression="lzw", width=21, height=20, units="cm")
+```
+
+# Root functional traits
+
+## Plot results
+
+```{r Plot root traits, fig.height=7.9, fig.width=8.3, message=FALSE, warning=FALSE}
+stat_rld<-bootstrap_mean(response="RLD", data=data, n_perm=10000)
+knitr::kable(stat_rld, caption="Results for root length density (mean in cm/cm³, ES in %)")
+stat_rsd<-bootstrap_mean(response="RSD", data=data, n_perm=10000)
+knitr::kable(stat_rsd, caption="Results for root surface density (mean in cm²/cm³, ES in %)")
+stat_srl<-bootstrap_mean(response="SRL", data=data, n_perm=10000)
+knitr::kable(stat_srl, caption="Results for specific root length (mean in m/g, ES in %)")
+stat_sra<-bootstrap_mean(response="SRA", data=data, n_perm=10000)
+knitr::kable(stat_sra, caption="Results for specific root area (mean in m²/g, ES in %)")
+stat_rtd<-bootstrap_mean(response="RTD", data=data, n_perm=10000)
+knitr::kable(stat_rtd, caption="Results for root tissue density (mean in mg/cm³, ES in %)")
+stat_d<-bootstrap_mean(response="D", data=data, n_perm=10000)
+knitr::kable(stat_d, caption="Results for root diameter (mean in mm, ES in %)")
+stat_nroot<-bootstrap_mean(response="Nroot", data=data, n_perm=10000)
+knitr::kable(stat_nroot, caption="Results for root N concentration (mean in mg/g, ES in %)")
+stat_croot<-bootstrap_mean(response="Croot", data=data, n_perm=10000)
+knitr::kable(stat_croot, caption="Results for root C concentration (mean in mg/g, ES in %)")
+stat_cnroot<-bootstrap_mean(response="CNroot", data=data, n_perm=10000)
+knitr::kable(stat_cnroot, caption="Results for root C:N (ES in %)")
+
+cex.axis<-9
+cex.title<-10
+cex.pt<-1.5
+
+cbPalette <- c("#C9B75E", "#0C6C67", "#11264B")
+
+#RSD: root surface density
+
+p1<-ggplot(data, aes(x=Treatment, y=RSD, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=RSD, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=RSD, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("RSD (cm² ", cm^-3, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=10, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#SRL: specific root length
+
+p2<-ggplot(data, aes(x=Treatment, y=SRL, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=SRL, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=SRL, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("SRL (m ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#SRA: specific root surface area
+
+p3<-ggplot(data, aes(x=Treatment, y=SRA, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=SRA, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=SRA, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("SRA (", m^2, " ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(vjust=0.5, margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#RTD: root tissue density
+
+p4<-ggplot(data, aes(x=Treatment, y=RTD, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=RTD, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=RTD, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("RTD (mg ", cm^-3, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#D: length-weighted average root diameter
+
+p5<-ggplot(data, aes(x=Treatment, y=D, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=D, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=D, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab("Root diameter (mm)")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=10, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Nroot: root nitrogen content
+
+p6<-ggplot(data, aes(x=Treatment, y=Nroot, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=Nroot, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=Nroot, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("Root N (mg ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Croot: root carbon content
+
+p7<-ggplot(data, aes(x=Treatment, y=Croot, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=Croot, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=Croot, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("Root C (mg ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#CNroot: root C:N
+
+p8<-ggplot(data, aes(x=Treatment, y=CNroot, fill=Treatment))+
+  facet_wrap(~Species, scales="free_y")+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=CNroot, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.2))+
+  stat_summary(aes(x=Treatment, y=CNroot, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.6, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab("Root C:N")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 5, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+p9<-ggarrange(p1,p5,p2,p6,p3,p7,p4,p8, nrow=4, ncol=2, align="v",
+              labels=c("(a)", "(e)", "(b)", "(f)", "(c)", "(g)", "(d)", "(h)"),
+              font.label = list(size=11))
+
+p9
+
+#ggsave("Root_traits.tiff", p9, dpi=1000, compression="lzw", width=21, height=20, units="cm")
+```
+
+## Plot unstandardised effect sizes
+
+```{r Plot effect sizes root traits, fig.height=7.9, fig.width=8.3, message=FALSE, warning=FALSE}
+es_rld<-bootstrap_ES(response="RLD", data=data, n_perm=10000, plot=FALSE)
+es_rsd<-bootstrap_ES(response="RSD", data=data, n_perm=10000, plot=FALSE)
+es_srl<-bootstrap_ES(response="SRL", data=data, n_perm=10000, plot=FALSE)
+es_sra<-bootstrap_ES(response="SRA", data=data, n_perm=10000, plot=FALSE)
+es_rtd<-bootstrap_ES(response="RTD", data=data, n_perm=10000, plot=FALSE)
+es_d<-bootstrap_ES(response="D", data=data, n_perm=10000, plot=FALSE)
+es_nroot<-bootstrap_ES(response="Nroot", data=data, n_perm=10000, plot=FALSE)
+es_croot<-bootstrap_ES(response="Croot", data=data, n_perm=10000, plot=FALSE)
+es_cnroot<-bootstrap_ES(response="CNroot", data=data, n_perm=10000, plot=FALSE)
+
+cex.axis<-9
+cex.title<-10
+cex.pt<-1.5
+cex.mean<-2.5
+
+cbPalette <- c("#11264B", "#C9B75E", "#0C6C67")
+
+#RSD: root surface density
+
+p1<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept=0)+
+  stat_ydensity(data=es_rsd$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_rsd$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_rsd$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES RSD (cm² ", cm^-3, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=10, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#SRL: specific root length
+
+p2<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept=0)+
+  stat_ydensity(data=es_srl$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_srl$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_srl$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES SRL (m ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#SRA: specific root surface area
+
+p3<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_sra$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_sra$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_sra$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES SRA (", m^2, " ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(vjust=0.5, margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#RTD: root tissue density
+
+p4<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept=0)+
+  stat_ydensity(data=es_rtd$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_rtd$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_rtd$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES RTD (mg ", cm^-3, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Forbs-Grasses", "Forbs-Soil", "Grasses-Soil"),
+                   labels=c("F-G", "F-CTL", "G-CTL"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#D: length-weighted average root diameter
+
+p5<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_d$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_d$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_d$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab("ES root diameter (mm)")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size=10, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Nroot: root nitrogen content
+
+p6<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_nroot$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_nroot$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_nroot$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES root N (mg ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Croot: root carbon content
+
+p7<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_croot$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_croot$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_croot$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab(expression(paste("ES root C (mg ", g^-1, ")", sep="")))+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        axis.text.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+#Root CN ratio
+
+p8<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept = 0)+
+  stat_ydensity(data=es_cnroot$bootstrap, aes(x=Contrast, y=ES, fill=Contrast),
+                color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_cnroot$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), 
+               size=0.6, inherit.aes = F)+
+  geom_point(data=es_cnroot$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), 
+             shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab("ES root C:N")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_blank(),
+        strip.background=element_blank())+
+  scale_x_discrete(limits=c("Forbs-Grasses", "Forbs-Soil", "Grasses-Soil"),
+                   labels=c("F-G", "F-CTL", "G-CTL"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+p9<-ggarrange(p1,p5,p2,p6,p3,p7,p4,p8, nrow=4, ncol=2, align="v",
+              labels=c("(a)", "(e)", "(b)", "(f)", "(c)", "(g)", "(d)", "(h)"),
+              font.label = list(size=11))
+
+p9
+
+#ggsave("Root_traits_ES.tiff", p9, dpi=1000, compression="lzw", width=21, height=20, units="cm")
+```
+
+# Nitrogen uptake
+
+```{r}
+stat_Nuptake<-bootstrap_mean(response="Nuptake", data=data, n_perm=10000)
+knitr::kable(stat_Nuptake, caption="Results for N uptake (mean in mg, ES in %)")
+
+cbPalette <- c("#C9B75E", "#0C6C67", "#11264B")
+
+cex.axis<-9
+cex.title<-10
+cex.pt<-1.5
+
+n<-ggplot(data, aes(x=Treatment, y=Nuptake, fill=Treatment))+
+  facet_wrap(~Species)+
+  stat_ydensity(color=adjustcolor("white", alpha.f = 0.1), alpha=0.2)+
+  geom_jitter(aes(x=Treatment, y=Nuptake, fill=Treatment), shape=21, size=cex.pt, alpha=0.3,
+              position=position_jitter(width=0.15))+
+  stat_summary(aes(x=Treatment, y=Nuptake, color=Treatment),
+               fun.data="mean_cl_boot", fun.args = list(B=10000), size=0.5, shape=16)+
+  theme_bw()+
+  xlab("")+
+  ylab("N uptake (mg)")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 8, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_text(size=cex.title, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_x_discrete(limits=c("Soil", "Forbs", "Grasses"),
+                   labels=c("CTL", "Forbs", "Grasses"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)
+
+n
+
+es_Nuptake<-bootstrap_ES(response="Nuptake", data=data, n_perm=10000, plot=FALSE)
+
+cex.axis<-9
+cex.title<-10
+cex.pt<-1.5
+cex.mean<-2.5
+
+cbPalette <- c("#11264B", "#C9B75E", "#0C6C67")
+
+esn<-ggplot(data)+
+  facet_wrap(~Species, scales="free_y")+
+  geom_hline(yintercept=0)+
+  stat_ydensity(data=es_Nuptake$bootstrap, aes(x=Contrast, y=ES, fill=Contrast), color=adjustcolor("white", alpha.f = 0.1), alpha=0.2, inherit.aes = FALSE)+
+  geom_segment(data=es_Nuptake$summary, aes(x=Contrast, xend=Contrast, y=lowCI, yend=highCI, color=Contrast), size=0.6, inherit.aes = F)+
+  geom_point(data=es_Nuptake$summary, mapping=aes(x=Contrast, y=ES, color=Contrast, fill=Contrast), shape=21, size=cex.mean, inherit.aes = F)+
+  theme_bw()+
+  xlab("")+
+  ylab("ES N uptake (mg)")+
+  theme(axis.title=element_text(size=cex.title, color="black", face="plain"),
+        axis.title.y=element_text(margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        axis.title.x=element_blank(),
+        axis.text=element_text(size=cex.axis, color="black"),
+        legend.position = "none", 
+        strip.text = element_text(size=10, face="italic"),
+        strip.background=element_rect(color="black"))+
+  scale_fill_manual(values=cbPalette)+
+  scale_color_manual(values=cbPalette)+
+  scale_x_discrete(limits=c("Forbs-Grasses", "Forbs-Soil", "Grasses-Soil"),
+                   labels=c("F-G", "F-CTL", "G-CTL"))
+
+esn
+```
+
+# Structural equation modelling
+
+## *Dianthus deltoides*
+
+### CTL-Forbs
+
+```{r SEM Dianthus CTL-Forbs, message=FALSE, warning=FALSE}
+data_forbs<-data[data$SampleID<=30 & data$Treatment!="Grasses",]
+data_forbs$Forbs<-c(rep(1,9), rep(0,9))
+
+model_forbs<-psem(lm(RDW~Forbs, data=data_forbs),
+                  lm(SRL~D+Forbs, data=data_forbs),
+                  lm(D~Forbs, data=data_forbs),
+                  lm(SRA~SRL+D, data=data_forbs),
+                  lm(Nuptake~RDW+SRA+Forbs, data=data_forbs))
+
+summary(model_forbs, .progressBar = F)
+
+maxi<-max(summary(model_forbs, .progressBar = F)$coeff$Std.Estimate[which(summary(model_forbs, .progressBar = F)$coeff$P.Value<0.05)])
+
+knitr::kable(
+data.frame(Response=summary(model_forbs, .progressBar = F)$coeff$Response,
+           Predictor=summary(model_forbs, .progressBar = F)$coeff$Predictor,
+           Std.Estimate=round(summary(model_forbs, .progressBar = F)$coeff$Std.Estimate, 2),
+           lwd=round(5*abs(summary(model_forbs, .progressBar = F)$coeff$Std.Estimate)/maxi, 1),
+           Signif=summary(model_forbs, .progressBar = F)$coeff[,9]), caption="Results SEM Dianthus deltoides CTL-Forbs")
+```
+
+### CTL-Grasses
+
+```{r SEM Dianthus CTL-Grasses, message=FALSE, warning=FALSE}
+data_grasses<-data[data$SampleID<=30 & data$Treatment!="Forbs",]
+data_grasses$Grasses<-c(rep(1,10), rep(0,9))
+
+model_grasses<-psem(lm(RDW~Grasses, data=data_grasses),
+                    lm(SRL~D+Grasses, data=data_grasses),
+                    lm(D~Grasses, data=data_grasses),
+                    lm(SRA~SRL+D, data=data_grasses),
+                    lm(Nuptake~RDW+SRA+Grasses, data=data_grasses))
+
+summary(model_grasses, .progressBar = F)
+
+maxi<-max(summary(model_grasses, .progressBar = F)$coeff$Std.Estimate[which(summary(model_grasses, .progressBar = F)$coeff$P.Value<0.05)])
+
+knitr::kable(
+data.frame(Response=summary(model_grasses, .progressBar = F)$coeff$Response,
+           Predictor=summary(model_grasses, .progressBar = F)$coeff$Predictor,
+           Std.Estimate=round(summary(model_grasses, .progressBar = F)$coeff$Std.Estimate, 2),
+           lwd=round(5*abs(summary(model_grasses, .progressBar = F)$coeff$Std.Estimate)/maxi, 1),
+           Signif=summary(model_grasses, .progressBar = F)$coeff[,9]), caption="Results SEM Dianthus deltoides CTL-Grasses")
+```
+
+## *Festuca rubra*
+
+### CTL-Forbs
+
+```{r SEM Festuca CTL-Forbs, message=FALSE, warning=FALSE}
+data_forbs<-data[data$SampleID>30 & data$Treatment!="Grasses",]
+data_forbs$Forbs<-c(rep(1,10), rep(0,10))
+
+model_forbs<-psem(lm(RDW~Forbs, data=data_forbs),
+                  lm(SRL~D+Forbs, data=data_forbs),
+                  lm(D~Forbs, data=data_forbs),
+                  lm(SRA~SRL+D, data=data_forbs),
+                  lm(Nuptake~RDW+SRA+Forbs, data=data_forbs))
+
+summary(model_forbs, .progressBar = F)
+
+maxi<-max(summary(model_forbs, .progressBar = F)$coeff$Std.Estimate[which(summary(model_forbs, .progressBar = F)$coeff$P.Value<0.05)])
+
+knitr::kable(
+data.frame(Response=summary(model_forbs, .progressBar = F)$coeff$Response,
+           Predictor=summary(model_forbs, .progressBar = F)$coeff$Predictor,
+           Std.Estimate=round(summary(model_forbs, .progressBar = F)$coeff$Std.Estimate, 2),
+           lwd=round(5*abs(summary(model_forbs, .progressBar = F)$coeff$Std.Estimate)/maxi, 1),
+           Signif=summary(model_forbs, .progressBar = F)$coeff[,9]), caption="Results SEM Festuca rubra CTL-Forbs")
+```
+
+### CTL-Grasses
+
+```{r SEM Festuca CTL-Grasses, message=FALSE, warning=FALSE}
+data_grasses<-data[data$SampleID>30 & data$Treatment!="Forbs",]
+data_grasses$Grasses<-c(rep(1,10), rep(0,10))
+
+model_grasses<-psem(lm(RDW~Grasses, data=data_grasses),
+                    lm(SRL~D+Grasses, data=data_grasses),
+                    lm(D~Grasses, data=data_grasses),
+                    lm(SRA~SRL+D, data=data_grasses),
+                    lm(Nuptake~RDW+SRA+Grasses, data=data_grasses))
+
+summary(model_grasses, .progressBar = F)
+
+maxi<-max(summary(model_grasses, .progressBar = F)$coeff$Std.Estimate[which(summary(model_grasses, .progressBar = F)$coeff$P.Value<0.05)])
+
+knitr::kable(
+data.frame(Response=summary(model_grasses, .progressBar = F)$coeff$Response,
+           Predictor=summary(model_grasses, .progressBar = F)$coeff$Predictor,
+           Std.Estimate=round(summary(model_grasses, .progressBar = F)$coeff$Std.Estimate, 2),
+           lwd=round(5*abs(summary(model_grasses, .progressBar = F)$coeff$Std.Estimate)/maxi, 1),
+           Signif=summary(model_grasses, .progressBar = F)$coeff[,9]), caption="Results SEM Festuca rubra CTL-Grasses")
+```
